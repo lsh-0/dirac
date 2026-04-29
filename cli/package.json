@@ -36,7 +36,7 @@
 	"scripts": {
 		"package:brew": "npx tsx ./scripts/update-brew-formula.mts",
 		"package": "npm pack --pack-destination ./dist",
-		"prepare": "npm run build",
+		"prepare": "echo 'npm run build (disabled)' ",
 		"build": "npm run typecheck && npx tsx esbuild.mts && npm run build:types",
 		"build:production": "npm run typecheck && npx tsx esbuild.mts --production && npm run build:types",
 		"build:types": "(npx tsc -p tsconfig.lib.json || true) && cp dist/types/cli/src/exports.d.ts dist/lib.d.ts && mkdir -p dist/agent && cp dist/types/cli/src/agent/DiracAgent.d.ts dist/types/cli/src/agent/DiracSessionEmitter.d.ts dist/types/cli/src/agent/public-types.d.ts dist/agent/ && rm -rf dist/types",

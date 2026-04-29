@@ -318,13 +318,13 @@ export class LiteLlmHandler implements ApiHandler {
 		for await (const chunk of stream) {
 			const delta = chunk.choices?.[0]?.delta
 
-			// Handle normal text content
-			if (delta?.content) {
 			// Handle tool calls
 			if (delta?.tool_calls) {
 				yield* toolCallProcessor.processToolCallDeltas(delta.tool_calls)
 			}
 
+			// Handle normal text content
+			if (delta?.content) {
 				yield {
 					type: "text",
 					text: delta.content,
