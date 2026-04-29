@@ -2,7 +2,6 @@ import { setTimeout as setTimeoutPromise } from "node:timers/promises"
 import { parseAssistantMessageV2, ToolUse } from "@core/assistant-message"
 import { sendPartialMessageEvent } from "@core/controller/ui/subscribeToPartialMessage"
 import { telemetryService } from "@services/telemetry"
-import { DiracAssistantContent } from "@shared/messages/content"
 import { convertDiracMessageToProto } from "@shared/proto-conversions/dirac-message"
 import { Session } from "@shared/services/Session"
 import { READ_ONLY_TOOLS } from "@shared/tools"
@@ -32,9 +31,10 @@ export class ResponseProcessor {
 		toolUseHandler: any
 	}): Promise<boolean> {
 		const { reasonsHandler } = this.dependencies.streamHandler.getHandlers()
-		const thinkingBlock = reasonsHandler.getCurrentReasoning()
+		const assistantContent = this.dependencies.streamHandler.getOrderedBlocks()
 		const assistantHasContent =
-			params.assistantMessage.length > 0 || this.dependencies.taskState.useNativeToolCalls || !!thinkingBlock?.thinking
+
+			assistantContent.length > 0 || params.assistantMessage.length > 0 || this.dependencies.taskState.useNativeToolCalls
 
 		if (assistantHasContent) {
 			telemetryService.captureConversationTurnEvent(
@@ -47,33 +47,7 @@ export class ResponseProcessor {
 				this.dependencies.taskState.useNativeToolCalls,
 			)
 
-
-			const redactedThinkingContent = reasonsHandler.getRedactedThinking()
 			const requestId = this.dependencies.streamHandler.requestId
-
-			const assistantContent: Array<DiracAssistantContent> = [...redactedThinkingContent]
-
-			if (thinkingBlock) {
-				assistantContent.push({ ...thinkingBlock })
-			}
-
-			const hasAssistantText = params.assistantTextOnly.trim().length > 0
-			if (hasAssistantText) {
-				assistantContent.push({
-					type: "text",
-					text: params.assistantTextOnly,
-					reasoning_details: thinkingBlock?.summary as any[],
-					signature: params.assistantTextSignature,
-					call_id: params.assistantMessageId,
-				})
-			}
-
-			const toolUseBlocks = params.toolUseHandler.getAllFinalizedToolUses(
-				hasAssistantText ? undefined : thinkingBlock?.summary,
-			)
-			if (toolUseBlocks.length > 0) {
-				assistantContent.push(...toolUseBlocks)
-			}
 
 			if (assistantContent.length > 0) {
 				await this.dependencies.messageStateHandler.addToApiConversationHistory({

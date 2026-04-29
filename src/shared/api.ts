@@ -1076,9 +1076,9 @@ export const openAiNativeModels = {
 // Uses OAuth authentication via ChatGPT, routes to chatgpt.com/backend-api/codex/responses
 // Subscription-based pricing (all costs are $0)
 export type OpenAiCodexModelId = keyof typeof openAiCodexModels
-export const openAiCodexDefaultModelId: OpenAiCodexModelId = "gpt-5.5-2026-04-23"
+export const openAiCodexDefaultModelId: OpenAiCodexModelId = "gpt-5.5"
 export const openAiCodexModels = {
-	"gpt-5.5-2026-04-23": {
+	"gpt-5.5": {
 		maxTokens: 128_000,
 		contextWindow: 1_050_000,
 		supportsImages: true,

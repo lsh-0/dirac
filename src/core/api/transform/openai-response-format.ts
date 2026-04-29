@@ -1,4 +1,4 @@
-import { ResponseInput, ResponseInputMessageContentList, ResponseReasoningItem } from "openai/resources/responses/responses"
+import { ResponseInput, ResponseInputMessageContentList } from "openai/resources/responses/responses"
 import {
 	DiracAssistantThinkingBlock,
 	DiracAssistantToolUseBlock,
@@ -118,11 +118,20 @@ export function convertToOpenAIResponsesInput(
 			// For assistant messages, we must ensure reasoning items are IMMEDIATELY followed
 			// by their corresponding message or function_call. Process the entire assistant
 			// turn and ensure proper pairing.
-			const reasoningItems: any[] = []
-			const outputItems: any[] = []
+			const assistantTurnItems = new Map<string, any>()
+			const itemOrder: string[] = []
 
 			for (const _part of m.content) {
 				const part = _part as DiracContent
+				const call_id = (part as any).call_id || (part as any).id
+				if (!call_id) continue
+
+				if (!assistantTurnItems.has(call_id)) {
+					itemOrder.push(call_id)
+				}
+
+				let item = assistantTurnItems.get(call_id)
+
 				switch (part.type) {
 					case "thinking": {
 						const thinkingBlock = part as DiracAssistantThinkingBlock
@@ -130,61 +139,52 @@ export function convertToOpenAIResponsesInput(
 						const hasSummaryContent =
 							thinkingBlock.summary && Array.isArray(thinkingBlock.summary) && thinkingBlock.summary.length > 0
 
-						if (thinkingBlock.call_id && thinkingBlock.call_id.length > 0) {
-							let summary: any[] = []
-							if (hasSummaryContent) {
-								summary = thinkingBlock.summary as any[]
-							} else if (hasThinkingContent) {
-								summary = [{ type: "summary_text", text: thinkingBlock.thinking }]
-							}
+						if (!item) {
+							item = { id: call_id, type: "reasoning", summary: [] }
+							assistantTurnItems.set(call_id, item)
+						}
 
-							reasoningItems.push({
-								id: thinkingBlock.call_id,
-								type: "reasoning",
-								summary,
-							} as ResponseReasoningItem)
+						if (hasSummaryContent) {
+							item.summary = thinkingBlock.summary as any[]
+						} else if (hasThinkingContent) {
+							item.summary = [{ type: "summary_text", text: thinkingBlock.thinking }]
 						}
 						break
 					}
 					case "redacted_thinking": {
 						const redactedBlock = part as DiracAssistantRedactedThinkingBlock
-						if (redactedBlock.call_id && redactedBlock.call_id.length > 0) {
-							const reasoningItem: any = {
-								id: redactedBlock.call_id,
-								type: "reasoning",
-								summary: [],
-							}
-							if (redactedBlock.data) {
-								reasoningItem.encrypted_content = redactedBlock.data
-							}
-							reasoningItems.push(reasoningItem as ResponseReasoningItem)
+						if (!item) {
+							item = { id: call_id, type: "reasoning", summary: [] }
+							assistantTurnItems.set(call_id, item)
+						}
+						if (redactedBlock.data) {
+							item.encrypted_content = redactedBlock.data
 						}
 						break
 					}
 					case "text": {
 						const textBlock = part as DiracTextContentBlock
-						const messageItem: any = {
+						assistantTurnItems.set(call_id, {
+							id: call_id,
 							type: "message",
 							role: "assistant",
 							content: [{ type: "output_text", text: textBlock.text || "" }],
-						}
-						if (textBlock.call_id) {
-							messageItem.id = textBlock.call_id
-						}
-						outputItems.push(messageItem)
+						})
 						break
 					}
 					case "image": {
 						const imageBlock = part as DiracImageContentBlock
-						const imageItem: any = {
+						assistantTurnItems.set(call_id, {
+							id: call_id,
 							type: "message",
 							role: "assistant",
-							content: [{ type: "output_text", text: `[image:${imageBlock.source.type === "base64" ? imageBlock.source.media_type : "url"}]` }],
-						}
-						if (imageBlock.call_id) {
-							imageItem.id = imageBlock.call_id
-						}
-						outputItems.push(imageItem)
+							content: [
+								{
+									type: "output_text",
+									text: `[image:${imageBlock.source.type === "base64" ? imageBlock.source.media_type : "url"}]`,
+								},
+							],
+						})
 						break
 					}
 					case "tool_use": {
@@ -193,7 +193,7 @@ export function convertToOpenAIResponsesInput(
 						if (toolUseBlock.call_id) {
 							toolUseIdToCallId.set(toolUseBlock.id, toolUseBlock.call_id)
 						}
-						outputItems.push({
+						assistantTurnItems.set(call_id, {
 							type: "function_call",
 							call_id,
 							id: !toolUseBlock.id.startsWith("fc_") ? `fc_${toolUseBlock.id.slice(0, 50)}` : toolUseBlock.id,
@@ -205,49 +205,35 @@ export function convertToOpenAIResponsesInput(
 				}
 			}
 
-			// Pair reasoning items with their corresponding output items.
-			// OpenAI Responses API requires that a reasoning item be immediately followed by the item it belongs to.
-			// We use the shared ID prefix (the 24 characters after 'rs_' or 'fc_') to identify pairings.
-			const assistantTurnItems: any[] = []
-			const usedReasoningIds = new Set<string>()
+			// Sort by raw ID (time-sortable hex) to restore original generation sequence.
+			// This ensures that reasoning items are correctly followed by their corresponding output items.
+			const sortedIds = itemOrder.sort((a, b) => {
+				const rawA = a.includes("_") ? a.split("_")[1] : a
+				const rawB = b.includes("_") ? b.split("_")[1] : b
+				return rawA.localeCompare(rawB)
+			})
 
-			for (const outputItem of outputItems) {
-				const outputId = outputItem.id || outputItem.call_id
-				if (outputId) {
-					// Extract the unique part of the ID (after the prefix)
-					const outputIdSuffix = outputId.includes("_") ? outputId.split("_")[1] : outputId
-					const outputIdPrefix = outputIdSuffix.slice(0, 24)
+			// Post-process to ensure strict pairing (every reasoning item must be followed by a message or function_call)
+			const finalizedTurnItems: any[] = []
+			for (let i = 0; i < sortedIds.length; i++) {
+				const id = sortedIds[i]
+				const item = assistantTurnItems.get(id)
+				finalizedTurnItems.push(item)
 
-					// Find a matching reasoning item
-					const matchingReasoning = reasoningItems.find((r) => {
-						if (usedReasoningIds.has(r.id)) return false
-						const reasoningIdSuffix = r.id.includes("_") ? r.id.split("_")[1] : r.id
-						return reasoningIdSuffix.startsWith(outputIdPrefix)
-					})
-
-					if (matchingReasoning) {
-						assistantTurnItems.push(matchingReasoning)
-						usedReasoningIds.add(matchingReasoning.id)
+				if (item.type === "reasoning") {
+					const nextId = sortedIds[i + 1]
+					const nextItem = nextId ? assistantTurnItems.get(nextId) : null
+					if (!nextItem || nextItem.type === "reasoning") {
+						finalizedTurnItems.push({
+							type: "message",
+							role: "assistant",
+							content: [{ type: "output_text", text: "" }],
+						})
 					}
 				}
-				assistantTurnItems.push(outputItem)
 			}
 
-			// Add any remaining (orphaned) reasoning items at the end, followed by a placeholder if needed.
-			// However, orphaned reasoning items are rare and usually indicate a bug in generation or storage.
-			for (const reasoningItem of reasoningItems) {
-				if (!usedReasoningIds.has(reasoningItem.id)) {
-					assistantTurnItems.push(reasoningItem)
-					// Every reasoning item MUST be followed by something.
-					assistantTurnItems.push({
-						type: "message",
-						role: "assistant",
-						content: [{ type: "output_text", text: "" }],
-					})
-				}
-			}
-
-			allItems.push(...assistantTurnItems)
+			allItems.push(...finalizedTurnItems)
 		} else {
 			// User messages - collect all content
 			const messageContent: ResponseInputMessageContentList = []

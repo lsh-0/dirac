@@ -28,6 +28,7 @@ import { NousResearchHandler } from "./providers/nousresearch"
 import { OpenAiHandler } from "./providers/openai"
 import { OpenAiCodexHandler } from "./providers/openai-codex"
 import { OpenAiNativeHandler } from "./providers/openai-native"
+import { OpenAiResponsesCompatibleHandler } from "./providers/openai-responses-compatible"
 import { OpenRouterHandler } from "./providers/openrouter"
 import { QwenHandler } from "./providers/qwen"
 import { QwenCodeHandler } from "./providers/qwen-code"
@@ -152,6 +153,17 @@ function createHandlerForProvider(
 			if (apiKey) {
 				const maskedKey = `${apiKey.slice(0, 4)}****${apiKey.slice(-4)}`
 				Logger.info(`Using OpenAI API key: ${maskedKey} (from ${options.openAiCompatibleCustomApiKey ? "custom key" : "standard key"})`)
+			}
+			if (options.openAiBaseUrl?.replace(/\/+$/, "").endsWith("/responses")) {
+				const normalizedBaseUrl = options.openAiBaseUrl.replace(/\/responses\/?$/, "")
+				return new OpenAiResponsesCompatibleHandler({
+					onRetryAttempt: options.onRetryAttempt,
+					openAiApiKey: apiKey,
+					openAiBaseUrl: normalizedBaseUrl,
+					openAiModelId,
+					openAiModelInfo,
+					reasoningEffort: mode === "plan" ? options.planModeReasoningEffort : options.actModeReasoningEffort,
+				})
 			}
 
 			return new OpenAiHandler({

@@ -2,10 +2,11 @@ import type { ToolUse } from "@core/assistant-message"
 import { JSONParser } from "@streamparser/json"
 import { nanoid } from "nanoid"
 import {
-    DiracAssistantRedactedThinkingBlock,
-    DiracAssistantThinkingBlock,
-    DiracAssistantToolUseBlock,
-    DiracReasoningDetailParam,
+	DiracAssistantRedactedThinkingBlock,
+	DiracAssistantThinkingBlock,
+	DiracAssistantToolUseBlock,
+	DiracReasoningDetailParam,
+	DiracAssistantContent,
 } from "@/shared/messages/content"
 import { Session } from "@/shared/services/Session"
 import { DiracDefaultTool } from "@/shared/tools"
@@ -57,6 +58,8 @@ const ESCAPE_PATTERN = /\\[ntr"\\]/g
 export class StreamResponseHandler {
 	private toolUseHandler = new ToolUseHandler()
 	private reasoningHandler = new ReasoningHandler()
+	private blockSequence: string[] = []
+	private textBlocks = new Map<string, { text: string; signature?: string }>()
 
 	private _requestId: string | undefined
 
@@ -77,10 +80,76 @@ export class StreamResponseHandler {
 		}
 	}
 
+	private recordId(id: string) {
+		if (!this.blockSequence.includes(id)) {
+			this.blockSequence.push(id)
+		}
+	}
+
+	public processTextDelta(delta: { id?: string; text?: string; signature?: string }) {
+		const id = delta.id || "default_text"
+		this.recordId(id)
+		let textData = this.textBlocks.get(id)
+		if (!textData) {
+			textData = { text: "" }
+			this.textBlocks.set(id, textData)
+		}
+		if (delta.text) {
+			textData.text += delta.text
+		}
+		if (delta.signature) {
+			textData.signature = delta.signature
+		}
+	}
+
+	public processReasoningDelta(delta: ReasoningDelta) {
+		const id = delta.id || this.reasoningHandler.getLastReasoningId() || "default_reasoning"
+		this.recordId(id)
+		this.reasoningHandler.processReasoningDelta({ ...delta, id })
+	}
+
+	public processToolUseDelta(delta: ToolUseDeltaBlock, call_id?: string) {
+		const id = delta.id || "default_tool_use"
+		this.recordId(id)
+		this.toolUseHandler.processToolUseDelta({ ...delta, id }, call_id)
+	}
+
+	public getOrderedBlocks(): DiracAssistantContent[] {
+		const blocks: DiracAssistantContent[] = []
+		for (const id of this.blockSequence) {
+			if (this.reasoningHandler.hasReasoning(id)) {
+				// Add redacted thinking first if any
+				const redacted = this.reasoningHandler.getRedactedThinkingForId(id)
+				blocks.push(...redacted)
+
+				const reasoningBlock = this.reasoningHandler.getReasoningBlock(id)
+				if (reasoningBlock) {
+					blocks.push(reasoningBlock)
+				}
+			} else if (this.toolUseHandler.hasToolUse(id)) {
+				const toolUse = this.toolUseHandler.getFinalizedToolUse(id)
+				if (toolUse) {
+					blocks.push(toolUse)
+				}
+			} else if (this.textBlocks.has(id)) {
+				const textData = this.textBlocks.get(id)!
+				blocks.push({
+					type: "text",
+					text: textData.text,
+					signature: textData.signature,
+					call_id: id,
+				})
+			}
+		}
+		return blocks
+	}
+
 	public reset() {
 		this._requestId = undefined
 		this.toolUseHandler = new ToolUseHandler()
 		this.reasoningHandler = new ReasoningHandler()
+		this.blockSequence = []
+		this.textBlocks.clear()
 	}
 }
 
@@ -91,7 +160,7 @@ class ToolUseHandler {
 	private pendingToolUses = new Map<string, PendingToolUse>()
 
 	processToolUseDelta(delta: ToolUseDeltaBlock, call_id?: string): void {
-		if (delta.type !== "tool_use" || !delta.id) {
+		if (!delta.id) {
 			return
 		}
 
@@ -169,17 +238,13 @@ class ToolUseHandler {
 				continue
 			}
 
-			// Try to get the most up-to-date parsed input
-			// Priority: parsedInput (from JSONParser) > fallback to manual parsing
 			let input: any = {}
 			if (pending.parsedInput != null) {
 				input = pending.parsedInput
 			} else if (pending.input) {
-				// Try full JSON parse first
 				try {
 					input = JSON.parse(pending.input)
 				} catch {
-					// Fall back to extracting partial fields from incomplete JSON
 					input = this.extractPartialJsonFields(pending.input)
 				}
 			}
@@ -200,7 +265,6 @@ class ToolUseHandler {
 				call_id: pending.call_id,
 			})
 		}
-		// Ensure all returned tool uses are marked as partial
 		return results.map((t) => ({ ...t, partial: true }))
 	}
 
@@ -224,13 +288,11 @@ class ToolUseHandler {
 			input: "",
 			parsedInput: undefined,
 			jsonParser,
-			// Ensure call_id is always set for tracking
 			call_id: callId || id || nanoid(8),
 			signature: undefined,
 		}
 
 		this.pendingToolUses.set(id, pending)
-		// Initialize tool call in session tracking
 		Session.get().updateToolCall(pending.call_id, pending.name)
 
 		return pending
@@ -252,81 +314,123 @@ class ToolUseHandler {
  * Handles streaming reasoning content and converts it to the appropriate message format
  */
 class ReasoningHandler {
-	private pendingReasoning: PendingReasoning | null = null
+	private pendingReasonings = new Map<string, PendingReasoning>()
+	private lastReasoningId: string | undefined
+
+	public hasReasoning(id: string): boolean {
+		return this.pendingReasonings.has(id)
+	}
+
+	public getLastReasoningId(): string | undefined {
+		return this.lastReasoningId
+	}
+
+	public getReasoningBlock(id: string): DiracAssistantThinkingBlock | null {
+		const pending = this.pendingReasonings.get(id)
+		if (pending) {
+			return this.mapToThinkingBlock(pending)
+		}
+		return null
+	}
+
+	public getRedactedThinkingForId(id: string): DiracAssistantRedactedThinkingBlock[] {
+		const pending = this.pendingReasonings.get(id)
+		return pending?.redactedThinking || []
+	}
 
 	processReasoningDelta(delta: ReasoningDelta): void {
-		// Initialize pending reasoning if we have an ID but no pending reasoning yet
-		if (!this.pendingReasoning) {
-			this.pendingReasoning = {
-				id: delta.id,
+		const id = delta.id || this.lastReasoningId
+		if (!id) return
+
+		this.lastReasoningId = id
+		let pending = this.pendingReasonings.get(id)
+		if (!pending) {
+			pending = {
+				id,
 				content: "",
 				signature: "",
 				redactedThinking: [],
 				summary: [],
 			}
+			this.pendingReasonings.set(id, pending)
 		}
 
-		if (!this.pendingReasoning) {
-			return
-		}
-
-		// Update fields from delta
 		if (delta.reasoning) {
-			this.pendingReasoning.content += delta.reasoning
+			pending.content += delta.reasoning
 		}
 		if (delta.signature) {
-			this.pendingReasoning.signature = delta.signature
+			pending.signature = delta.signature
 		}
 		if (delta.details) {
 			if (Array.isArray(delta.details)) {
-				this.pendingReasoning.summary.push(...delta.details)
+				pending.summary.push(...delta.details)
 			} else {
-				this.pendingReasoning.summary.push(delta.details)
+				pending.summary.push(delta.details)
 			}
 		}
 		if (delta.redacted_data) {
-			this.pendingReasoning.redactedThinking.push({
+			pending.redactedThinking.push({
 				type: "redacted_thinking",
 				data: delta.redacted_data,
-				call_id: delta.id || this.pendingReasoning.id,
+				call_id: delta.id || pending.id,
 			})
 		}
 	}
 
 	getCurrentReasoning(): DiracAssistantThinkingBlock | null {
-		if (!this.pendingReasoning) {
+		if (this.lastReasoningId) {
+			const pending = this.pendingReasonings.get(this.lastReasoningId)
+			if (pending) {
+				return this.mapToThinkingBlock(pending)
+			}
+		}
+		return null
+	}
+
+	getAllReasoningBlocks(): DiracAssistantThinkingBlock[] {
+		const results: DiracAssistantThinkingBlock[] = []
+		for (const pending of this.pendingReasonings.values()) {
+			const block = this.mapToThinkingBlock(pending)
+			if (block) {
+				results.push(block)
+			}
+		}
+		return results
+	}
+
+	private mapToThinkingBlock(pending: PendingReasoning): DiracAssistantThinkingBlock | null {
+		if (!pending.summary.length && !pending.content && pending.redactedThinking.length > 0) {
 			return null
 		}
 
-		if (!this.pendingReasoning.summary.length && !this.pendingReasoning.content) {
-			return null
-		}
-
-		// Ensure signature is set if it's hidden in the summary / reasoning details
-		// to ensure it's always accessible at the top level by each provider.
-		if (!this.pendingReasoning.signature && this.pendingReasoning.summary.length) {
-			const lastSummary = this.pendingReasoning.summary.at(-1)
+		if (!pending.signature && pending.summary.length) {
+			const lastSummary = pending.summary.at(-1)
 			if (lastSummary && typeof lastSummary === "object" && "signature" in lastSummary) {
 				if (typeof lastSummary.signature === "string") {
-					this.pendingReasoning.signature = lastSummary.signature
+					pending.signature = lastSummary.signature
 				}
 			}
 		}
 
 		return {
 			type: "thinking",
-			thinking: this.pendingReasoning.content,
-			signature: this.pendingReasoning.signature,
-			summary: this.pendingReasoning.summary,
-			call_id: this.pendingReasoning.id,
+			thinking: pending.content,
+			signature: pending.signature,
+			summary: pending.summary,
+			call_id: pending.id,
 		}
 	}
 
 	getRedactedThinking(): DiracAssistantRedactedThinkingBlock[] {
-		return this.pendingReasoning?.redactedThinking || []
+		const results: DiracAssistantRedactedThinkingBlock[] = []
+		for (const pending of this.pendingReasonings.values()) {
+			results.push(...pending.redactedThinking)
+		}
+		return results
 	}
 
 	reset(): void {
-		this.pendingReasoning = null
+		this.pendingReasonings.clear()
+		this.lastReasoningId = undefined
 	}
 }

@@ -44,8 +44,9 @@ export class OpenRouterHandler implements ApiHandler {
 					baseURL: "https://openrouter.ai/api/v1",
 					apiKey: this.options.openRouterApiKey,
 					defaultHeaders: {
-						"HTTP-Referer": "https://dirac.run", // Optional, for including your app on openrouter.ai rankings.
-						"X-Title": "Dirac", // Optional. Shows in rankings on openrouter.ai.
+						"HTTP-Referer": "https://dirac.run",
+						"X-OpenRouter-Title": "Dirac",
+						"X-OpenRouter-Categories": "cli-agent,ide-extension",
 					},
 				})
 			} catch (error: any) {

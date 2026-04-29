@@ -825,13 +825,13 @@ export class Task {
 					} else if (Array.isArray(message.content)) {
 						for (const block of message.content) {
 							if (block.type === "text") {
-								markdown += `${block.text}\n\n`
+								markdown += `**Text:** ${block.call_id ? `(\`call_id: ${block.call_id}\`)` : ""}\n${block.text}\n\n`
 							} else if (block.type === "thinking") {
-								markdown += `**Thinking:**\n${block.thinking}\n\n`
+								markdown += `**Thinking:** ${block.call_id ? `(\`call_id: ${block.call_id}\`)` : ""}\n${block.thinking}\n\n`
 							} else if (block.type === "redacted_thinking") {
-								markdown += `**Thinking:** [Redacted]\n\n`
+								markdown += `**Thinking:** [Redacted] ${block.call_id ? `(\`call_id: ${block.call_id}\`)` : ""}\n\n`
 							} else if (block.type === "tool_use") {
-								markdown += `**Tool Use:** \`${block.name}\` (\`${block.id}\`)\n`
+								markdown += `**Tool Use:** \`${block.name}\` (\`id: ${block.id}\`, \`call_id: ${block.call_id}\`)\n`
 								markdown += `\`\`\`json\n${JSON.stringify(block.input, null, 2)}\n\`\`\`\n\n`
 							} else if (block.type === "tool_result") {
 								markdown += `**Tool Result:** (\`${block.tool_use_id}\`)\n`
@@ -1503,7 +1503,7 @@ ${notice}`
 					switch (chunk.type) {
 						case "reasoning": {
 							const details = chunk.details ? (Array.isArray(chunk.details) ? chunk.details : [chunk.details]) : []
-							reasonsHandler.processReasoningDelta({
+							this.streamHandler.processReasoningDelta({
 								id: chunk.id,
 								reasoning: chunk.reasoning,
 								signature: chunk.signature,
@@ -1520,7 +1520,7 @@ ${notice}`
 							break
 						}
 						case "tool_calls": {
-							toolUseHandler.processToolUseDelta(
+							this.streamHandler.processToolUseDelta(
 								{
 									id: chunk.tool_call.function?.id,
 									type: "tool_use",
@@ -1548,6 +1548,8 @@ ${notice}`
 							if (chunk.signature) {
 								assistantTextSignature = chunk.signature
 							}
+							this.streamHandler.processTextDelta(chunk)
+
 							if (chunk.id) {
 								assistantMessageId = chunk.id
 							}

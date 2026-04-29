@@ -9,7 +9,7 @@ import { ApiHandler } from "@core/api"
 export function getContextWindowInfo(api: ApiHandler) {
 	const HARD_LIMIT = 1_000_000
 
-	let contextWindow = api.getModel().info.contextWindow || 128_000
+	let contextWindow = api.getModel().info.contextWindow || 256_000
 
 	const maxAllowedSize = Math.min(HARD_LIMIT, Math.max(contextWindow - 40_000, contextWindow * 0.8))
 
